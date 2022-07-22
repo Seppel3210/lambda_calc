@@ -31,6 +31,8 @@ impl Term {
                     Rc::new(self.clone())
                 }
             }
+            // inner variables shadow outer ones
+            let_ @ Term::Let { var: v, .. } if var == v => Rc::new(let_.clone()),
             Term::Let {
                 var: v,
                 term: t,
@@ -40,6 +42,8 @@ impl Term {
                 term: t.subst(var, term.clone()),
                 body: b.subst(var, term),
             }),
+            // inner variables shadow outer ones
+            fun @ Term::Fun { var: v, .. } if var == v => Rc::new(fun.clone()),
             Term::Fun { var: v, body: b } => Rc::new(Term::Fun {
                 var: v.clone(),
                 body: b.subst(var, term),
