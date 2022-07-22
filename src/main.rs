@@ -83,16 +83,49 @@ impl Term {
             }
         }
     }
+
+    fn is_app(&self) -> bool {
+        matches!(self, Term::App { .. })
+    }
+
+    fn prec(&self) -> u32 {
+        // max: 10
+        // arg: 9
+        // lead: 8
+        // min/default: 0
+        match self {
+            Term::Var(_) => 10,
+            Term::Let { .. } => 8,
+            Term::Fun { .. } => 8,
+            Term::App { .. } => 8,
+        }
+    }
+
+    fn fmt_pretty(&self, f: &mut fmt::Formatter<'_>, prec: u32) -> fmt::Result {
+        if self.prec() < prec {
+            write!(f, "(")?
+        }
+        match self {
+            Term::Var(n) => write!(f, "{n}")?,
+            Term::Let { var, term, body } => write!(f, "let {var} := {term:?};\n{body:?}")?,
+            Term::Fun { var, body } => write!(f, "fun {var}. {body:?}")?,
+            Term::App { fun, val } => {
+                let fun_prec = if fun.is_app() { 8 } else { 9 };
+                fun.fmt_pretty(f, fun_prec)?;
+                write!(f, " ")?;
+                val.fmt_pretty(f, 9)?
+            }
+        };
+        if self.prec() < prec {
+            write!(f, ")")?
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for Term {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Term::Var(n) => write!(f, "{n}"),
-            Term::Let { var, term, body } => write!(f, "let {var} := {term:?};\n{body:?})"),
-            Term::Fun { var, body } => write!(f, "(fun {var}. {body:?})"),
-            Term::App { fun, val } => write!(f, "{fun:?} {val:?}"),
-        }
+        self.fmt_pretty(f, 0)
     }
 }
 
@@ -138,8 +171,9 @@ fn main() {
     let term = parser.parse(
         "
         let zero := fun s. fun z. z;
-        let succ := fun n. fun s. fun zero. s (n s zero);
-        succ zero
+        let succ := fun n. fun s. fun z. s (n s z);
+        let add := fun n. fun m. fun s. fun z. n s (m s z);
+        add (succ (succ zero)) (zero)
         ",
     );
     println!("{:?}", term);
