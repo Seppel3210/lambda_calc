@@ -50,6 +50,35 @@ impl Term {
             }),
         }
     }
+
+    fn reduce_once(&self) -> Option<Rc<Term>> {
+        match self {
+            Term::Var(_) => None,
+            Term::Let { var, term, body } => Some(body.subst(var, term.clone())),
+            Term::Fun { var, body } => Some(Rc::new(Term::Fun {
+                var: var.clone(),
+                body: body.reduce_once()?,
+            })),
+            Term::App { fun, val } => {
+                if let Term::Fun { var, body } = fun.as_ref() {
+                    Some(body.subst(var, val.clone()))
+                } else {
+                    (|| {
+                        Some(Rc::new(Term::App {
+                            fun: fun.reduce_once()?,
+                            val: val.clone(),
+                        }))
+                    })()
+                    .or_else(|| {
+                        Some(Rc::new(Term::App {
+                            fun: fun.clone(),
+                            val: val.reduce_once()?,
+                        }))
+                    })
+                }
+            }
+        }
+    }
 }
 
 impl fmt::Debug for Term {
@@ -87,6 +116,7 @@ fn parser() -> impl Parser<char, Term, Error = Simple<char>> {
             term.delimited_by(just('('), just(')')),
         ));
         no_app_term
+            .padded()
             .repeated()
             .at_least(1)
             .map(|mut v| (v.remove(0), v))
@@ -95,10 +125,23 @@ fn parser() -> impl Parser<char, Term, Error = Simple<char>> {
                 val: Rc::new(v),
             })
     })
-    .padded()
+    .then_ignore(end())
 }
 
 fn main() {
     let parser = parser();
-    println!("{:?}", parser.parse("fun x. x"))
+    // let term = parser.parse("(fun f. f f) fun f. f f");
+    let term = parser.parse(
+        "
+        let zero := fun s. fun z. z;
+        let succ := fun n. fun s. fun zero. s (n s zero);
+        succ zero
+        ",
+    );
+    println!("{:?}", term);
+    let mut term = Rc::new(term.unwrap());
+    while let Some(t) = term.reduce_once() {
+        term = t;
+        println!("reduced:\n{:?}", term)
+    }
 }
