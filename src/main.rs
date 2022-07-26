@@ -51,87 +51,43 @@ impl<V: fmt::Display> fmt::Debug for TypeError<V> {
 }
 
 impl<V: Clone + Eq + Hash> Term<V> {
-    fn subst(&self, var: &V, term: Rc<Self>) -> Rc<Self> {
-        match self {
-            Term::Var(x) => {
-                if x == var {
-                    term
-                } else {
-                    Rc::new(self.clone())
-                }
-            }
-            // inner variables shadow outer ones
-            let_ @ Term::Let { var: v, .. } if var == v => Rc::new(let_.clone()),
-            Term::Let {
-                var: v,
-                var_type,
-                term: t,
-                body: b,
-            } => Rc::new(Term::Let {
-                var: v.clone(),
-                var_type: var_type
-                    .clone()
-                    .map(|var_type| var_type.subst(var, term.clone())),
-                term: t.subst(var, term.clone()),
-                body: b.subst(var, term),
-            }),
-            // inner variables shadow outer ones
-            fun @ Term::Fun { var: v, .. } if var == v => Rc::new(fun.clone()),
-            Term::Fun {
-                var: v,
-                var_type,
-                body,
-            } => Rc::new(Term::Fun {
-                var: v.clone(),
-                var_type: var_type.subst(var, term.clone()),
-                body: body.subst(var, term),
-            }),
-            Term::App { fun, val } => Rc::new(Term::App {
-                fun: fun.subst(var, term.clone()),
-                val: val.subst(var, term),
-            }),
-            Term::Forall {
-                var: v,
-                var_type,
-                ret_type,
-            } => Rc::new(Term::Forall {
-                var: v.clone(),
-                var_type: var_type.subst(var, term.clone()),
-                ret_type: ret_type.subst(var, term),
-            }),
-            Term::Type => Rc::new(Term::Type),
-        }
-    }
-
+    /// reduce a term in a given value context
     /// assumes well-typed term
-    fn reduce(&self) -> Rc<Self> {
+    fn reduce(&self, mut context: HashMap<V, Rc<Self>>) -> Rc<Self> {
         match self {
-            var @ Term::Var(_) => Rc::new(var.clone()),
+            var @ Term::Var(id) => context
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| Rc::new(var.clone())),
             Term::Let {
                 var,
                 var_type: _,
                 term,
                 body,
-            } => body.subst(var, term.reduce()).reduce(),
+            } => {
+                context.insert(var.clone(), term.reduce(context.clone()));
+                body.reduce(context)
+            }
             Term::Fun {
                 var,
                 var_type,
                 body,
             } => Rc::new(Term::Fun {
                 var: var.clone(),
-                var_type: var_type.clone(),
-                body: body.reduce(),
+                var_type: var_type.reduce(context.clone()),
+                body: body.reduce(context),
             }),
             Term::App { fun, val } => {
-                let fun = fun.reduce();
-                let val = val.reduce();
+                let fun = fun.reduce(context.clone());
+                let val = val.reduce(context.clone());
                 if let Term::Fun {
                     var,
                     var_type: _,
                     body,
                 } = fun.as_ref()
                 {
-                    body.subst(var, val).reduce()
+                    context.insert(var.clone(), val);
+                    body.reduce(context)
                 } else {
                     Rc::new(Term::App { fun, val })
                 }
@@ -142,218 +98,178 @@ impl<V: Clone + Eq + Hash> Term<V> {
                 ret_type,
             } => Rc::new(Term::Forall {
                 var: var.clone(),
-                var_type: var_type.clone(),
-                ret_type: ret_type.reduce(),
+                var_type: var_type.reduce(context.clone()),
+                ret_type: ret_type.reduce(context),
             }),
             Term::Type => Rc::new(Term::Type),
-        }
-    }
-
-    /// assumes well-typed term
-    fn reduce_once(&self) -> Option<Rc<Self>> {
-        match self {
-            Term::Var(_) => None,
-            Term::Let {
-                var,
-                var_type: _,
-                term,
-                body,
-            } => Some(body.subst(var, term.clone())),
-            Term::Fun {
-                var,
-                var_type,
-                body,
-            } => Some(Rc::new(Term::Fun {
-                var: var.clone(),
-                var_type: var_type.clone(),
-                body: body.reduce_once()?,
-            })),
-            Term::App { fun, val } => {
-                if let Term::Fun {
-                    var,
-                    var_type: _,
-                    body,
-                } = fun.as_ref()
-                {
-                    Some(body.subst(var, val.clone()))
-                } else {
-                    (|| {
-                        Some(Rc::new(Term::App {
-                            fun: fun.reduce_once()?,
-                            val: val.clone(),
-                        }))
-                    })()
-                    .or_else(|| {
-                        Some(Rc::new(Term::App {
-                            fun: fun.clone(),
-                            val: val.reduce_once()?,
-                        }))
-                    })
-                }
-            }
-            Term::Forall {
-                var,
-                var_type,
-                ret_type,
-            } => Some(Rc::new(Term::Forall {
-                var: var.clone(),
-                var_type: var_type.clone(),
-                ret_type: ret_type.reduce_once()?,
-            })),
-            Term::Type => None,
         }
     }
 
     /// Checks if this `Term` is well typed in the given `context` and returns its type.
     /// The `Term`s in the `context` HashMap have to be types.
     /// Returns `Ok(None)` for the term `Type`
-    fn type_(&self, mut context: HashMap<V, Self>) -> Result<Option<Self>, TypeError<V>> {
-        match self {
-            Term::Var(var) => Ok(Some(
-                context
-                    .get(var)
-                    .ok_or(TypeError::VarNotFound(var.clone()))?
-                    .clone(),
-            )),
-            Term::Let {
-                var,
-                var_type,
-                term,
-                body,
-            } => {
-                let term_type = term
-                    .type_(context.clone())?
-                    .ok_or(TypeError::TypeUntypable)?;
-                if let Some(var_type) = var_type {
-                    var_type.type_(context.clone())?;
-                    term_type.equiv(var_type, &mut HashMap::new())?;
-                }
-                context.insert(var.clone(), term_type);
-                body.type_(context)
-            }
-            Term::Fun {
-                var,
-                var_type,
-                body,
-            } => {
-                var_type.type_(context.clone())?;
-                context.insert(var.clone(), (**var_type).clone());
-                Ok(Some(Term::Forall {
-                    var: Some(var.clone()),
-                    var_type: var_type.clone(),
-                    ret_type: Rc::new(body.type_(context)?.ok_or(TypeError::TypeUntypable)?),
-                }))
-            }
+    fn type_(&self, type_context: HashMap<V, Self>) -> Result<Option<Self>, TypeError<V>> {
+        fn type_<V: Clone + Eq + Hash>(
+            this: &Term<V>,
+            mut type_context: HashMap<V, Term<V>>,
+            mut value_context: HashMap<V, Rc<Term<V>>>,
+        ) -> Result<Option<Term<V>>, TypeError<V>> {
+            match this {
+                Term::Var(var) => Ok(Some(
+                    type_context
+                        .get(var)
+                        .ok_or(TypeError::VarNotFound(var.clone()))?
+                        .clone(),
+                )),
+                Term::Let {
+                    var,
+                    var_type,
+                    term,
+                    body,
+                } => {
+                    let term_type = type_(&term, type_context.clone(), value_context.clone())?
+                        .ok_or(TypeError::TypeUntypable)?;
+                    if let Some(var_type) = var_type {
+                        type_(&var_type, type_context.clone(), value_context.clone())?;
+                        term_type.equiv(var_type, value_context.clone())?;
+                    }
 
-            Term::App { fun, val } => {
-                let fun_type = fun
-                    .type_(context.clone())?
-                    .ok_or(TypeError::NoFunction(Term::Type))?;
-                let val_type = val
-                    .type_(context.clone())?
-                    .ok_or(TypeError::TypeUntypable)?;
-                if let Term::Forall {
+                    type_context.insert(var.clone(), term_type);
+                    value_context.insert(var.clone(), term.clone());
+                    type_(&body, type_context, value_context)
+                }
+                Term::Fun {
+                    var,
+                    var_type,
+                    body,
+                } => {
+                    type_(&var_type, type_context.clone(), value_context.clone())?;
+                    type_context.insert(var.clone(), (**var_type).clone());
+                    Ok(Some(Term::Forall {
+                        var: Some(var.clone()),
+                        var_type: var_type.clone(),
+                        ret_type: Rc::new(
+                            type_(&body, type_context, value_context)?
+                                .ok_or(TypeError::TypeUntypable)?,
+                        ),
+                    }))
+                }
+
+                Term::App { fun, val } => {
+                    let fun_type = type_(&fun, type_context.clone(), value_context.clone())?
+                        .ok_or(TypeError::NoFunction(Term::Type))?;
+                    let val_type = type_(&val, type_context.clone(), value_context.clone())?
+                        .ok_or(TypeError::TypeUntypable)?;
+                    if let Term::Forall {
+                        var,
+                        var_type,
+                        ret_type,
+                    } = fun_type
+                    {
+                        var_type.equiv(&val_type, value_context.clone())?;
+                        if let Some(var) = var {
+                            let reduce_ctx = HashMap::from([(var, val.clone())]);
+                            Ok(Some((*ret_type.reduce(reduce_ctx)).clone()))
+                        } else {
+                            Ok(Some((*ret_type).clone()))
+                        }
+                    } else {
+                        Err(TypeError::NoFunction((**fun).clone()))
+                    }
+                }
+                Term::Forall {
                     var,
                     var_type,
                     ret_type,
-                } = fun_type
-                {
-                    var_type.equiv(&val_type, &mut HashMap::new())?;
+                } => {
+                    type_(&var_type, type_context.clone(), value_context.clone())?;
                     if let Some(var) = var {
-                        Ok(Some((*ret_type.subst(&var, val.clone())).clone()))
-                    } else {
-                        Ok(Some((*ret_type).clone()))
+                        type_context.insert(var.clone(), (**var_type).clone());
                     }
-                } else {
-                    Err(TypeError::NoFunction((**fun).clone()))
+                    type_(&ret_type, type_context, value_context)?;
+                    Ok(Some(Term::Type))
                 }
+                Term::Type => Ok(None),
             }
-            Term::Forall {
-                var,
-                var_type,
-                ret_type,
-            } => {
-                var_type.type_(context.clone())?;
-                if let Some(var) = var {
-                    context.insert(var.clone(), (**var_type).clone());
-                }
-                ret_type.type_(context)?;
-                Ok(Some(Term::Type))
-            }
-            Term::Type => Ok(None),
         }
+        type_(self, type_context, HashMap::new())
     }
 
-    // check for alpha equivalence
-    fn equiv(
-        &self,
-        other_term: &Self,
-        name_mapping: &mut HashMap<V, V>,
-    ) -> Result<(), TypeError<V>> {
-        let this = self.reduce();
-        let other = other_term.reduce();
-        let eq = match (this.as_ref(), other.as_ref()) {
-            (Term::Var(var_a), Term::Var(var_b)) => {
-                let mapped = name_mapping.entry(var_a.clone()).or_insert(var_b.clone());
-                mapped == var_b
-            }
-            (Term::Let { .. }, Term::Let { .. }) => unreachable!("let can always be reduced"),
-            (
-                Term::Fun {
-                    var: var_a,
-                    var_type: type_a,
-                    body: body_a,
-                },
-                Term::Fun {
-                    var: var_b,
-                    var_type: type_b,
-                    body: body_b,
-                },
-            ) => {
-                type_a.equiv(type_b, name_mapping).is_ok() && {
-                    name_mapping.insert(var_a.clone(), var_b.clone());
-                    body_a.equiv(body_b, name_mapping).is_ok()
+    // check for alpha equivalence in a given Context
+    fn equiv(&self, other_term: &Self, context: HashMap<V, Rc<Self>>) -> Result<(), TypeError<V>> {
+        fn equiv<V: Clone + Eq + Hash>(
+            this_term: &Term<V>,
+            other_term: &Term<V>,
+            context: HashMap<V, Rc<Term<V>>>,
+            name_mapping: &mut HashMap<V, V>,
+        ) -> Result<(), TypeError<V>> {
+            let this = this_term.reduce(context.clone());
+            let other = other_term.reduce(context.clone());
+            let eq = match (this.as_ref(), other.as_ref()) {
+                (Term::Var(var_a), Term::Var(var_b)) => {
+                    let mapped = name_mapping.entry(var_a.clone()).or_insert(var_b.clone());
+                    mapped == var_b
                 }
-            }
-            (
-                Term::App {
-                    fun: fun_a,
-                    val: val_a,
-                },
-                Term::App {
-                    fun: fun_b,
-                    val: val_b,
-                },
-            ) => {
-                fun_a.equiv(fun_b, name_mapping).is_ok() && val_a.equiv(val_b, name_mapping).is_ok()
-            }
-            (
-                Term::Forall {
-                    var: var_a,
-                    var_type: var_type_a,
-                    ret_type: ret_type_a,
-                },
-                Term::Forall {
-                    var: var_b,
-                    var_type: var_type_b,
-                    ret_type: ret_type_b,
-                },
-            ) => {
-                var_type_a.equiv(var_type_b, name_mapping).is_ok() && {
-                    if let (Some(var_a), Some(var_b)) = (var_a, var_b) {
+                (Term::Let { .. }, Term::Let { .. }) => unreachable!("let can always be reduced"),
+                (
+                    Term::Fun {
+                        var: var_a,
+                        var_type: type_a,
+                        body: body_a,
+                    },
+                    Term::Fun {
+                        var: var_b,
+                        var_type: type_b,
+                        body: body_b,
+                    },
+                ) => {
+                    equiv(&type_a, type_b, context.clone(), name_mapping).is_ok() && {
                         name_mapping.insert(var_a.clone(), var_b.clone());
+                        equiv(&body_a, body_b, context, name_mapping).is_ok()
                     }
-                    ret_type_a.equiv(ret_type_b, name_mapping).is_ok()
                 }
+                (
+                    Term::App {
+                        fun: fun_a,
+                        val: val_a,
+                    },
+                    Term::App {
+                        fun: fun_b,
+                        val: val_b,
+                    },
+                ) => {
+                    equiv(&fun_a, fun_b, context.clone(), name_mapping).is_ok()
+                        && equiv(&val_a, val_b, context, name_mapping).is_ok()
+                }
+                (
+                    Term::Forall {
+                        var: var_a,
+                        var_type: var_type_a,
+                        ret_type: ret_type_a,
+                    },
+                    Term::Forall {
+                        var: var_b,
+                        var_type: var_type_b,
+                        ret_type: ret_type_b,
+                    },
+                ) => {
+                    equiv(&var_type_a, var_type_b, context.clone(), name_mapping).is_ok() && {
+                        if let (Some(var_a), Some(var_b)) = (var_a, var_b) {
+                            name_mapping.insert(var_a.clone(), var_b.clone());
+                        }
+                        equiv(&ret_type_a, ret_type_b, context, name_mapping).is_ok()
+                    }
+                }
+                (Term::Type, Term::Type) => true,
+                _ => false,
+            };
+            if eq {
+                Ok(())
+            } else {
+                Err(TypeError::Mismatch(this_term.clone(), other_term.clone()))
             }
-            (Term::Type, Term::Type) => true,
-            _ => false,
-        };
-        if eq {
-            Ok(())
-        } else {
-            Err(TypeError::Mismatch(self.clone(), other_term.clone()))
         }
+        equiv(self, other_term, context, &mut HashMap::new())
     }
 }
 
@@ -451,7 +367,7 @@ impl fmt::Display for Var {
 impl Term<String> {
     /// returns the name of the variable if it is undefined
     fn make_vars_unique(self, extern_vars: HashSet<String>) -> Result<Term<Var>, String> {
-        fn inner(
+        fn mk_unique(
             this: Rc<Term<String>>,
             ids: &mut HashMap<String, u32>,
             mut context: HashMap<String, u32>,
@@ -467,9 +383,9 @@ impl Term<String> {
                     term,
                     body,
                 } => {
-                    let term = inner(term.clone(), ids, context.clone())?;
+                    let term = mk_unique(term.clone(), ids, context.clone())?;
                     let var_type = match var_type {
-                        Some(var_type) => Some(inner(var_type.clone(), ids, context.clone())?),
+                        Some(var_type) => Some(mk_unique(var_type.clone(), ids, context.clone())?),
                         None => None,
                     };
                     let discr = *ids
@@ -484,7 +400,7 @@ impl Term<String> {
                         },
                         var_type,
                         term,
-                        body: inner(body.clone(), ids, context)?,
+                        body: mk_unique(body.clone(), ids, context)?,
                     }))
                 }
                 Term::Fun {
@@ -492,7 +408,7 @@ impl Term<String> {
                     var_type,
                     body,
                 } => {
-                    let var_type = inner(var_type.clone(), ids, context.clone())?;
+                    let var_type = mk_unique(var_type.clone(), ids, context.clone())?;
                     let discr = *ids
                         .entry(name.clone())
                         .and_modify(|id| *id += 1)
@@ -504,12 +420,12 @@ impl Term<String> {
                             discr,
                         },
                         var_type,
-                        body: inner(body.clone(), ids, context)?,
+                        body: mk_unique(body.clone(), ids, context)?,
                     }))
                 }
                 Term::App { fun, val } => Ok(Rc::new(Term::App {
-                    fun: inner(fun.clone(), ids, context.clone())?,
-                    val: inner(val.clone(), ids, context)?,
+                    fun: mk_unique(fun.clone(), ids, context.clone())?,
+                    val: mk_unique(val.clone(), ids, context)?,
                 })),
                 Term::Forall {
                     var,
@@ -517,7 +433,7 @@ impl Term<String> {
                     ret_type,
                 } => {
                     if let Some(name) = var {
-                        let var_type = inner(var_type.clone(), ids, context.clone())?;
+                        let var_type = mk_unique(var_type.clone(), ids, context.clone())?;
                         let discr = *ids
                             .entry(name.clone())
                             .and_modify(|id| *id += 1)
@@ -529,13 +445,13 @@ impl Term<String> {
                                 discr,
                             }),
                             var_type,
-                            ret_type: inner(ret_type.clone(), ids, context)?,
+                            ret_type: mk_unique(ret_type.clone(), ids, context)?,
                         }))
                     } else {
                         Ok(Rc::new(Term::Forall {
                             var: None,
-                            var_type: inner(var_type.clone(), ids, context.clone())?,
-                            ret_type: inner(ret_type.clone(), ids, context)?,
+                            var_type: mk_unique(var_type.clone(), ids, context.clone())?,
+                            ret_type: mk_unique(ret_type.clone(), ids, context)?,
                         }))
                     }
                 }
@@ -544,7 +460,7 @@ impl Term<String> {
         }
         let mut ids = HashMap::new();
         let context = extern_vars.into_iter().map(|var| (var, 0)).collect();
-        inner(Rc::new(self), &mut ids, context).map(|t| (*t).clone())
+        mk_unique(Rc::new(self), &mut ids, context).map(|t| (*t).clone())
     }
 }
 
@@ -645,16 +561,16 @@ fn main() {
             fun X : Type. fun f : A -> B -> X. f a b;
         let iff : forall A : Type. forall B : Type. Type :=
             fun A : Type. fun B : Type. and (A -> B) (B -> A);
-        fun A : Type. mk_and (A -> A) (A -> A)
+        let iff_refl : forall A : Type. iff A A := fun A : Type. mk_and (A -> A) (A -> A) (id A) (id A);
+        iff_refl
         ",
-        // let iff_refl : forall A : Type. iff A A := fun A : Type. mk_and (A -> A) (A -> A) (id A) (id A);
     );
     let term = term.unwrap().make_vars_unique([].into()).unwrap();
     println!("{}", term);
     match term.type_(HashMap::new()) {
         Err(err) => println!("Error: {err:?}"),
         Ok(type_) => {
-            println!("reduced: {}", term.reduce());
+            println!("reduced: {}", term.reduce([].into()));
             println!("type: {type_:?}");
         }
     }
