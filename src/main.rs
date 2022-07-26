@@ -1,28 +1,26 @@
 use chumsky::prelude::*;
-use std::{fmt, rc::Rc};
-
-type Var = String;
+use std::{collections::HashMap, fmt, rc::Rc};
 
 #[derive(PartialEq, Eq, Clone)]
-enum Term {
-    Var(Var),
+enum Term<V> {
+    Var(V),
     Let {
-        var: Var,
-        term: Rc<Term>,
-        body: Rc<Term>,
+        var: V,
+        term: Rc<Term<V>>,
+        body: Rc<Term<V>>,
     },
     Fun {
-        var: Var,
-        body: Rc<Term>,
+        var: V,
+        body: Rc<Term<V>>,
     },
     App {
-        fun: Rc<Term>,
-        val: Rc<Term>,
+        fun: Rc<Term<V>>,
+        val: Rc<Term<V>>,
     },
 }
 
-impl Term {
-    fn subst(&self, var: &Var, term: Rc<Term>) -> Rc<Term> {
+impl<V: Clone + Eq> Term<V> {
+    fn subst(&self, var: &V, term: Rc<Term<V>>) -> Rc<Term<V>> {
         match self {
             Term::Var(x) => {
                 if x == var {
@@ -55,7 +53,27 @@ impl Term {
         }
     }
 
-    fn reduce_once(&self) -> Option<Rc<Term>> {
+    fn reduce(&self) -> Rc<Self> {
+        match self {
+            var @ Term::Var(_) => Rc::new(var.clone()),
+            Term::Let { var, term, body } => body.subst(var, term.reduce()).reduce(),
+            Term::Fun { var, body } => Rc::new(Term::Fun {
+                var: var.clone(),
+                body: body.reduce(),
+            }),
+            Term::App { fun, val } => {
+                let fun = fun.reduce();
+                let val = val.reduce();
+                if let Term::Fun { var, body } = fun.as_ref() {
+                    body.subst(var, val).reduce()
+                } else {
+                    Rc::new(Term::App { fun, val })
+                }
+            }
+        }
+    }
+
+    fn reduce_once(&self) -> Option<Rc<Self>> {
         match self {
             Term::Var(_) => None,
             Term::Let { var, term, body } => Some(body.subst(var, term.clone())),
@@ -83,7 +101,9 @@ impl Term {
             }
         }
     }
+}
 
+impl<V> Term<V> {
     fn is_app(&self) -> bool {
         matches!(self, Term::App { .. })
     }
@@ -100,15 +120,17 @@ impl Term {
             Term::App { .. } => 8,
         }
     }
+}
 
+impl<V: fmt::Display> Term<V> {
     fn fmt_pretty(&self, f: &mut fmt::Formatter<'_>, prec: u32) -> fmt::Result {
         if self.prec() < prec {
             write!(f, "(")?
         }
         match self {
             Term::Var(n) => write!(f, "{n}")?,
-            Term::Let { var, term, body } => write!(f, "let {var} := {term:?};\n{body:?}")?,
-            Term::Fun { var, body } => write!(f, "fun {var}. {body:?}")?,
+            Term::Let { var, term, body } => write!(f, "let {var} := {term};\n{body}")?,
+            Term::Fun { var, body } => write!(f, "fun {var}. {body}")?,
             Term::App { fun, val } => {
                 let fun_prec = if fun.is_app() { 8 } else { 9 };
                 fun.fmt_pretty(f, fun_prec)?;
@@ -123,13 +145,89 @@ impl Term {
     }
 }
 
-impl fmt::Debug for Term {
+#[derive(PartialEq, Eq, Clone)]
+struct Var {
+    name: String,
+    /// discriminant
+    discr: u32,
+}
+
+impl fmt::Display for Var {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.discr == 0 {
+            self.name.fmt(f)
+        } else {
+            write!(f, "{}_{}", self.name, self.discr)
+        }
+    }
+}
+
+impl Term<String> {
+    /// returns the name of the variable if it is undefined
+    fn make_vars_unique(self) -> Result<Term<Var>, String> {
+        fn inner(
+            this: Rc<Term<String>>,
+            ids: &mut HashMap<String, u32>,
+            mut context: HashMap<String, u32>,
+        ) -> Result<Rc<Term<Var>>, String> {
+            match this.as_ref() {
+                Term::Var(name) => Ok(Rc::new(Term::Var(Var {
+                    discr: *context.get(name).ok_or(name)?,
+                    name: name.clone(),
+                }))),
+                Term::Let {
+                    var: name,
+                    term,
+                    body,
+                } => {
+                    let term = inner(term.clone(), ids, context.clone())?;
+                    let discr = *ids
+                        .entry(name.clone())
+                        .and_modify(|id| *id += 1)
+                        .or_insert(0);
+                    context.insert(name.clone(), discr);
+                    Ok(Rc::new(Term::Let {
+                        var: Var {
+                            name: name.clone(),
+                            discr,
+                        },
+                        term,
+                        body: inner(body.clone(), ids, context)?,
+                    }))
+                }
+                Term::Fun { var: name, body } => {
+                    let discr = *ids
+                        .entry(name.clone())
+                        .and_modify(|id| *id += 1)
+                        .or_insert(0);
+                    context.insert(name.clone(), discr);
+                    Ok(Rc::new(Term::Fun {
+                        var: Var {
+                            name: name.clone(),
+                            discr,
+                        },
+                        body: inner(body.clone(), ids, context)?,
+                    }))
+                }
+                Term::App { fun, val } => Ok(Rc::new(Term::App {
+                    fun: inner(fun.clone(), ids, context.clone())?,
+                    val: inner(val.clone(), ids, context)?,
+                })),
+            }
+        }
+        let mut ids = HashMap::new();
+        let context = HashMap::new();
+        inner(Rc::new(self), &mut ids, context).map(|t| (*t).clone())
+    }
+}
+
+impl<V: fmt::Display> fmt::Display for Term<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.fmt_pretty(f, 0)
     }
 }
 
-fn parser() -> impl Parser<char, Term, Error = Simple<char>> {
+fn parser() -> impl Parser<char, Term<String>, Error = Simple<char>> {
     recursive(|term| {
         let t = term.clone().padded().map(Rc::new);
 
@@ -172,14 +270,18 @@ fn main() {
         "
         let zero := fun s. fun z. z;
         let succ := fun n. fun s. fun z. s (n s z);
+        let pred := fun n. fun s. fun z. n (fun g. fun h. h (g s)) (fun u. z) fun x. x;
         let add := fun n. fun m. fun s. fun z. n s (m s z);
-        add (succ (succ zero)) (zero)
+        let sub := fun n. fun m. m pred n;
+        sub ((succ zero)) (succ zero)
         ",
     );
-    println!("{:?}", term);
-    let mut term = Rc::new(term.unwrap());
-    while let Some(t) = term.reduce_once() {
-        term = t;
-        println!("reduced:\n{:?}", term)
-    }
+    let term = term.unwrap().make_vars_unique().unwrap();
+    println!("{}", term);
+    println!("reduced: {}", term.reduce());
+    // let mut term = Rc::new(term.unwrap());
+    // while let Some(t) = term.reduce_once() {
+    //     term = t;
+    //     println!("step:\n{:?}", term)
+    // }
 }
