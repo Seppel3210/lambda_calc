@@ -400,12 +400,14 @@ struct Var {
     discr: u32,
 }
 
+const SHOW_DISCRIMINANT: bool = false;
+
 impl fmt::Display for Var {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.discr == 0 {
-            self.name.fmt(f)
-        } else {
+        if SHOW_DISCRIMINANT && self.discr != 0 {
             write!(f, "{}_{}", self.name, self.discr)
+        } else {
+            self.name.fmt(f)
         }
     }
 }
