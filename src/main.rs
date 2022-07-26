@@ -1,5 +1,10 @@
 use chumsky::prelude::*;
-use std::{collections::HashMap, fmt, hash::Hash, rc::Rc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    hash::Hash,
+    rc::Rc,
+};
 
 #[derive(PartialEq, Clone)]
 enum Term<V> {
@@ -402,7 +407,7 @@ impl fmt::Display for Var {
 
 impl Term<String> {
     /// returns the name of the variable if it is undefined
-    fn make_vars_unique(self) -> Result<Term<Var>, String> {
+    fn make_vars_unique(self, extern_vars: HashSet<String>) -> Result<Term<Var>, String> {
         fn inner(
             this: Rc<Term<String>>,
             ids: &mut HashMap<String, u32>,
@@ -487,7 +492,7 @@ impl Term<String> {
             }
         }
         let mut ids = HashMap::new();
-        let context = HashMap::new();
+        let context = extern_vars.into_iter().map(|var| (var, 0)).collect();
         inner(Rc::new(self), &mut ids, context).map(|t| (*t).clone())
     }
 }
@@ -572,13 +577,14 @@ fn parser() -> impl Parser<char, Term<String>, Error = Simple<char>> {
 
 fn main() {
     let parser = parser();
-    // let term = parser.parse("(fun f : Type -> Type. f f) fun f: Type. f f");
+    // impossible to make this term type-check
+    //let term = parser.parse("(fun f : Type -> Type. f f) fun f: Type. f f");
     let term = parser.parse(
         "
         forall T : Type. T -> T
         ",
     );
-    let term = term.unwrap().make_vars_unique().unwrap();
+    let term = term.unwrap().make_vars_unique([].into()).unwrap();
     println!("{}", term);
     if let Err(err) = term.type_(HashMap::new()) {
         println!("Error: {err:?}");
