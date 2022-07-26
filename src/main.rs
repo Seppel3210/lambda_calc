@@ -228,13 +228,17 @@ impl<V: Clone + Eq + Hash> Term<V> {
                     .type_(context.clone())?
                     .ok_or(TypeError::TypeUntypable)?;
                 if let Term::Forall {
-                    var: _,
+                    var,
                     var_type,
                     ret_type,
                 } = fun_type
                 {
                     var_type.equiv(&val_type, &mut HashMap::new())?;
-                    Ok(Some((*ret_type).clone()))
+                    if let Some(var) = var {
+                        Ok(Some((*ret_type.subst(&var, val.clone())).clone()))
+                    } else {
+                        Ok(Some((*ret_type).clone()))
+                    }
                 } else {
                     Err(TypeError::NoFunction((**fun).clone()))
                 }
@@ -263,7 +267,7 @@ impl<V: Clone + Eq + Hash> Term<V> {
     ) -> Result<(), TypeError<V>> {
         let this = self.reduce();
         let other = other_term.reduce();
-        let eq = match (self, other.as_ref()) {
+        let eq = match (this.as_ref(), other.as_ref()) {
             (Term::Var(var_a), Term::Var(var_b)) => {
                 let mapped = name_mapping.entry(var_a.clone()).or_insert(var_b.clone());
                 mapped == var_b
@@ -376,7 +380,8 @@ impl<V: fmt::Display> Term<V> {
                 if let Some(var) = var {
                     write!(f, "∀ {var} : {var_type}. {ret_type}")?
                 } else {
-                    write!(f, "{var_type} -> {ret_type}")?
+                    var_type.fmt_pretty(f, 9)?;
+                    write!(f, " -> {ret_type}")?
                 }
             }
             Term::Type => write!(f, "Type")?,
@@ -443,6 +448,7 @@ impl Term<String> {
                     var_type,
                     body,
                 } => {
+                    let var_type = inner(var_type.clone(), ids, context.clone())?;
                     let discr = *ids
                         .entry(name.clone())
                         .and_modify(|id| *id += 1)
@@ -453,7 +459,7 @@ impl Term<String> {
                             name: name.clone(),
                             discr,
                         },
-                        var_type: inner(var_type.clone(), ids, context.clone())?,
+                        var_type,
                         body: inner(body.clone(), ids, context)?,
                     }))
                 }
@@ -467,6 +473,7 @@ impl Term<String> {
                     ret_type,
                 } => {
                     if let Some(name) = var {
+                        let var_type = inner(var_type.clone(), ids, context.clone())?;
                         let discr = *ids
                             .entry(name.clone())
                             .and_modify(|id| *id += 1)
@@ -477,7 +484,7 @@ impl Term<String> {
                                 name: name.clone(),
                                 discr,
                             }),
-                            var_type: inner(var_type.clone(), ids, context.clone())?,
+                            var_type,
                             ret_type: inner(ret_type.clone(), ids, context)?,
                         }))
                     } else {
