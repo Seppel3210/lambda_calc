@@ -158,6 +158,7 @@ impl<V: Clone + Eq + Hash> Term<V> {
                 Term::App { fun, val } => {
                     let fun_type = type_(&fun, type_context.clone(), value_context.clone())?
                         .ok_or(TypeError::NoFunction(Term::Type))?;
+                    let fun_type = (*fun_type.reduce(value_context.clone())).clone();
                     let val_type = type_(&val, type_context.clone(), value_context.clone())?
                         .ok_or(TypeError::TypeUntypable)?;
                     if let Term::Forall {
@@ -266,7 +267,7 @@ impl<V: Clone + Eq + Hash> Term<V> {
             if eq {
                 Ok(())
             } else {
-                Err(TypeError::Mismatch(this_term.clone(), other_term.clone()))
+                Err(TypeError::Mismatch((*this).clone(), (*other).clone()))
             }
         }
         equiv(self, other_term, context, &mut HashMap::new())
@@ -555,28 +556,45 @@ fn main() {
     let term = parser.parse(
         "
         let id : forall T : Type. T -> T := fun T : Type. fun x : T. x;
-        let and : forall A : Type. forall B : Type. Type :=
-            fun A : Type. fun B : Type. forall X : Type. (A -> B -> X) -> X;
-        let mk_and := fun A : Type. fun B : Type. fun a : A. fun b : B.
-            fun X : Type. fun f : A -> B -> X. f a b;
-        let iff : forall A : Type. forall B : Type. Type :=
-            fun A : Type. fun B : Type. and (A -> B) (B -> A);
-        let iff_refl : forall A : Type. iff A A := fun A : Type. mk_and (A -> A) (A -> A) (id A) (id A);
-        iff_refl
+
+        let and := fun A : Type. fun B : Type. forall X : Type. (A -> B -> X) -> X;
+        let and_mk : forall A : Type. forall B : Type. A -> B -> and A B :=
+            fun A : Type. fun B : Type. fun a : A. fun b : B. fun X : Type. fun elim : A -> B -> X. elim a b;
+
+        let and_comm : forall A : Type. forall B : Type. and A B -> and B A :=
+            fun A : Type. fun B : Type. fun a_and_b : and A B. a_and_b (and B A) fun a : A. fun b : B. and_mk B A b a;
+
+        let or := fun A : Type. fun B : Type. forall X : Type. (A -> X) -> (B -> X) -> X;
+        let or_mk_l : forall A : Type. forall B : Type. A -> or A B :=
+            fun A : Type. fun B : Type. fun a : A. fun X : Type. fun l : (A -> X). fun r : (B -> X). l a;
+        let or_mk_r : forall A : Type. forall B : Type. B -> or A B :=
+            fun A : Type. fun B : Type. fun b : B. fun X : Type. fun l : (A -> X). fun r : (B -> X). r b;
+
+        let or_comm : forall A : Type. forall B : Type. or A B -> or B A :=
+            fun A : Type. fun B : Type. fun a_or_b : or A B. a_or_b (or B A) (or_mk_r B A) (or_mk_l B A);
+
+        let iff := fun A : Type. fun B : Type. and (A -> B) (B -> A);
+        let iff_mk : forall A : Type. forall B : Type. (A -> B) -> (B -> A) -> iff A B :=
+            fun A : Type. fun B : Type. fun a_to_b : A -> B. fun b_to_a : B -> A. and_mk (A -> B) (B -> A) a_to_b b_to_a;
+
+        let iff_refl : forall A : Type. iff A A := fun A : Type. iff_mk A A (id A) (id A);
+
+        let pair : forall T : Type. T -> T -> forall X : Type. (T -> T -> X) -> X :=
+            fun T : Type. fun x : T. fun y : T. fun X : Type. fun elim : T -> T -> X. elim x y;
+        forall A : Type. iff A A
         ",
     );
+    println!("Parsing done.");
     let term = term.unwrap().make_vars_unique([].into()).unwrap();
     println!("{}", term);
     match term.type_(HashMap::new()) {
-        Err(err) => println!("Error: {err:?}"),
+        Err(err) => match err {
+            TypeError::Mismatch(a, b) => println!("Error: Mismatch\n{a}\n{b}"),
+            _ => println!("Error: {err:?}"),
+        },
         Ok(type_) => {
             println!("reduced: {}", term.reduce([].into()));
             println!("type: {type_:?}");
         }
     }
-    // let mut term = Rc::new(term.unwrap());
-    // while let Some(t) = term.reduce_once() {
-    //     term = t;
-    //     println!("step:\n{:?}", term)
-    // }
 }
