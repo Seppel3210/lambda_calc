@@ -534,17 +534,18 @@ fn parser() -> impl Parser<char, Term<String>, Error = Simple<char>> {
                 fun: Rc::new(f),
                 val: Rc::new(v),
             });
-        let arrow = app
-            .clone()
-            .map(Rc::new)
-            .then_ignore(just("->"))
-            .then(t.clone())
-            .map(|(var_type, ret_type)| Term::Forall {
-                var: None,
-                var_type,
-                ret_type,
-            });
-        arrow.or(app)
+        app.then(just("->").ignore_then(t).or_not())
+            .map(|(lhs, rhs)| {
+                if let Some(rhs) = rhs {
+                    Term::Forall {
+                        var: None,
+                        var_type: Rc::new(lhs),
+                        ret_type: rhs,
+                    }
+                } else {
+                    lhs
+                }
+            })
     })
     .then_ignore(end())
 }
