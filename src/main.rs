@@ -72,11 +72,15 @@ impl<V: Clone + Eq + Hash> Term<V> {
                 var,
                 var_type,
                 body,
-            } => Rc::new(Term::Fun {
-                var: var.clone(),
-                var_type: var_type.reduce(context.clone()),
-                body: body.reduce(context),
-            }),
+            } => {
+                // Name shadowing
+                context.remove(var);
+                Rc::new(Term::Fun {
+                    var: var.clone(),
+                    var_type: var_type.reduce(context.clone()),
+                    body: body.reduce(context),
+                })
+            }
             Term::App { fun, val } => {
                 let fun = fun.reduce(context.clone());
                 let val = val.reduce(context.clone());
@@ -96,11 +100,17 @@ impl<V: Clone + Eq + Hash> Term<V> {
                 var,
                 var_type,
                 ret_type,
-            } => Rc::new(Term::Forall {
-                var: var.clone(),
-                var_type: var_type.reduce(context.clone()),
-                ret_type: ret_type.reduce(context),
-            }),
+            } => {
+                // Name shadowing
+                if let Some(var) = var {
+                    context.remove(var);
+                }
+                Rc::new(Term::Forall {
+                    var: var.clone(),
+                    var_type: var_type.reduce(context.clone()),
+                    ret_type: ret_type.reduce(context),
+                })
+            }
             Term::Type => Rc::new(Term::Type),
         }
     }
@@ -558,36 +568,45 @@ fn main() {
         "
         let id : forall T : Type. T -> T := fun T : Type. fun x : T. x;
 
-        let and := fun A : Type. fun B : Type. forall X : Type. (A -> B -> X) -> X;
-        let and_mk : forall A : Type. forall B : Type. A -> B -> and A B :=
+        let And := fun A : Type. fun B : Type. forall X : Type. (A -> B -> X) -> X;
+        let And_mk : forall A : Type. forall B : Type. A -> B -> And A B :=
             fun A : Type. fun B : Type. fun a : A. fun b : B. fun X : Type. fun elim : A -> B -> X. elim a b;
 
-        let and_comm : forall A : Type. forall B : Type. and A B -> and B A :=
-            fun A : Type. fun B : Type. fun a_and_b : and A B. a_and_b (and B A) fun a : A. fun b : B. and_mk B A b a;
+        let And_comm : forall A : Type. forall B : Type. And A B -> And B A :=
+            fun A : Type. fun B : Type. fun a_and_b : And A B. a_and_b (And B A) fun a : A. fun b : B. And_mk B A b a;
 
-        let or := fun A : Type. fun B : Type. forall X : Type. (A -> X) -> (B -> X) -> X;
-        let or_mk_l : forall A : Type. forall B : Type. A -> or A B :=
+        let Or := fun A : Type. fun B : Type. forall X : Type. (A -> X) -> (B -> X) -> X;
+        let Or_mk_l : forall A : Type. forall B : Type. A -> Or A B :=
             fun A : Type. fun B : Type. fun a : A. fun X : Type. fun l : (A -> X). fun r : (B -> X). l a;
-        let or_mk_r : forall A : Type. forall B : Type. B -> or A B :=
+        let Or_mk_r : forall A : Type. forall B : Type. B -> Or A B :=
             fun A : Type. fun B : Type. fun b : B. fun X : Type. fun l : (A -> X). fun r : (B -> X). r b;
 
-        let or_comm : forall A : Type. forall B : Type. or A B -> or B A :=
-            fun A : Type. fun B : Type. fun a_or_b : or A B. a_or_b (or B A) (or_mk_r B A) (or_mk_l B A);
+        let Or_comm : forall A : Type. forall B : Type. Or A B -> Or B A :=
+            fun A : Type. fun B : Type. fun a_or_b : Or A B. a_or_b (Or B A) (Or_mk_r B A) (Or_mk_l B A);
 
-        let iff := fun A : Type. fun B : Type. and (A -> B) (B -> A);
-        let iff_mk : forall A : Type. forall B : Type. (A -> B) -> (B -> A) -> iff A B :=
-            fun A : Type. fun B : Type. fun a_to_b : A -> B. fun b_to_a : B -> A. and_mk (A -> B) (B -> A) a_to_b b_to_a;
+        let Iff := fun A : Type. fun B : Type. And (A -> B) (B -> A);
+        let Iff_mk : forall A : Type. forall B : Type. (A -> B) -> (B -> A) -> Iff A B :=
+            fun A : Type. fun B : Type. fun a_to_b : A -> B. fun b_to_a : B -> A. And_mk (A -> B) (B -> A) a_to_b b_to_a;
 
-        let iff_refl : forall A : Type. iff A A := fun A : Type. iff_mk A A (id A) (id A);
+        let Iff_refl : forall A : Type. Iff A A := fun A : Type. Iff_mk A A (id A) (id A);
 
-        let pair : forall T : Type. T -> T -> forall X : Type. (T -> T -> X) -> X :=
-            fun T : Type. fun x : T. fun y : T. fun X : Type. fun elim : T -> T -> X. elim x y;
-        forall A : Type. iff A A
+        let Nat := forall X : Type. ((forall R : Type. R -> (X -> R) -> R) -> X) -> X;
+        let Nat_zero : Nat :=
+            fun X : Type. fun ctor : (forall R : Type. R -> (X -> R) -> R) -> X.
+                ctor fun R : Type. fun r : R. fun x_to_r : X -> R. r;
+        let Nat_succ : Nat -> Nat := fun n : Nat.
+            fun X : Type. fun ctor : (forall R : Type. R -> (X -> R) -> R) -> X.
+                ctor fun R : Type. fun r : R. fun x_to_r : X -> R. x_to_r (n X ctor);
+                    
+        (Nat_succ Nat_zero) Nat fun matcher : (forall R : Type. R -> (Nat -> R) -> R). matcher Nat (Nat_succ Nat_zero) fun n_ : Nat. Nat_zero
         ",
+        // let Nat_pred : Nat -> Nat := fun n : Nat.
+        //     n Nat fun matcher : forall R : Type. R -> (Nat -> R) -> R. Nat_zero;
     );
     println!("Parsing done.");
     let term = term.unwrap().make_vars_unique([].into()).unwrap();
     println!("{}", term);
+    println!();
     match term.type_(HashMap::new()) {
         Err(err) => match err {
             TypeError::Mismatch(a, b) => println!("Error: Mismatch\n{a}\n{b}"),
